@@ -4,139 +4,147 @@ import path from "path";
 import cors from "cors";
 import multer from "multer";
 import { createRequire } from "module";
+import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-import fs from "fs";
 
 dotenv.config();
 
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse");
+
 const upload = multer({ storage: multer.memoryStorage() });
-
-const DB_PATH = path.join(process.cwd(), "database.json");
-
-const readDB = () => JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
-const writeDB = (data: any) => fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-
-async function callGemini(prompt: string, apiKey: string) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.7, responseMimeType: "application/json" }
-    })
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(`Gemini Error: ${data.error?.message || response.statusText}`);
-  if (!data.candidates) throw new Error("No response generated.");
-  return data.candidates[0].content.parts[0].text.replace(/```json|```/gi, "").trim();
-}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
   app.use(cors());
   app.use(express.json());
 
   const apiKey = process.env.GEMINI_API_KEY || "";
+  if (!apiKey) {
+    console.error("WARNING: GEMINI_API_KEY is not set in environment variables.");
+  }
 
-  app.post("/api/login", (req, res) => {
-    const { username, password } = req.body;
-    const db = readDB();
-    const user = db.users.find((u: any) => u.username === username && u.password === password);
+  const ai = new GoogleGenAI({ apiKey });
+  const MODEL_NAME = "gemini-1.5-flash"; // Switched back to 1.5-flash for better stability/quota in some regions
+
+  const firstNames = ["James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael", "Linda", "William", "Elizabeth", "David", "Barbara", "Richard", "Susan", "Joseph", "Jessica", "Thomas", "Sarah", "Charles", "Karen", "Christopher", "Nancy", "Matthew", "Lisa", "Anthony", "Betty"];
+  const lastNames = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson", "White", "Harris", "Sanchez"];
+  const titles = ["Senior Frontend Developer", "Backend Engineer", "Full Stack Developer", "AI/ML Specialist", "DevOps Engineer", "Product Designer", "Data Scientist", "iOS Developer", "Android Developer", "Site Reliability Engineer", "Cloud Architect", "Security Engineer", "Data Engineer", "Frontend Specialist"];
+  const skills = [
+    ["React", "TypeScript", "Tailwind", "Next.js", "Redux", "Storybook", "Jest"],
+    ["Node.js", "Express", "PostgreSQL", "Redis", "Docker", "TypeORM", "Swagger"],
+    ["Python", "Django", "FastAPI", "MongoDB", "Kubernetes", "Pytest", "gRPC"],
+    ["AWS", "Azure", "Terraform", "CI/CD", "Prometheus", "Grafana", "Ansible"],
+    ["Figma", "UI/UX", "Adobe XD", "Prototyping", "Design Systems", "User Research"],
+    ["PyTorch", "TensorFlow", "Scikit-learn", "NLP", "Computer Vision", "HuggingFace"],
+    ["Swift", "SwiftUI", "Objective-C", "CoreData", "Combine", "Unit Testing"],
+    ["Kotlin", "Java", "Jetpack Compose", "Coroutines", "Dagger Hilt", "Retrofit"]
+  ];
+
+  const CANDIDATE_DB = Array.from({ length: 151 }, (_, i) => {
+    const firstName = firstNames[Math.floor(Math.random() * firstNames.length)];
+    const lastName = lastNames[Math.floor(Math.random() * lastNames.length)];
+    const title = titles[Math.floor(Math.random() * titles.length)];
+    const skillSet = skills[Math.floor(Math.random() * skills.length)];
     
-    if (user) {
-      res.json({ success: true, role: user.role, candidateId: user.candidateId });
-    } else {
-      res.status(401).json({ success: false, error: "Invalid credentials" });
-    }
-  });
-
-  app.get("/api/candidate/:id", (req, res) => {
-    const db = readDB();
-    const candidate = db.candidates.find((c: any) => c.id === req.params.id);
-    if (candidate) res.json(candidate);
-    else res.status(404).json({ error: "Not found" });
-  });
-
-  app.post("/api/apply", (req, res) => {
-    const newCandidate = req.body;
-    const db = readDB();
-    
-    const newId = (db.candidates.length + 1).toString();
-    const candidateEntry = {
-      ...newCandidate,
-      id: newId,
-      status: "Applied",
-      personality: "Eager, polite, and hopeful about the opportunity.", 
+    return {
+      id: (i + 1).toString(),
+      name: `${firstName} ${lastName}`,
+      title,
+      experience: Math.floor(Math.random() * 12) + 2,
+      raw_skills: skillSet.join(", "),
     };
-
-    db.candidates.push(candidateEntry);
-
-    const username = newCandidate.name.split(' ')[0].toLowerCase() + newId;
-    db.users.push({
-      username: username,
-      password: "password123",
-      role: "candidate",
-      candidateId: newId
-    });
-
-    writeDB(db);
-    res.json({ success: true, candidateId: newId, username, password: "password123" });
-  });
-
-  app.post("/api/candidate/rate", (req, res) => {
-    const { candidate_id, score } = req.body;
-    const db = readDB();
-    const idx = db.candidates.findIndex((c: any) => c.id === candidate_id);
-    if(idx !== -1) {
-      db.candidates[idx].interestScore = score;
-      writeDB(db);
-      res.json({ success: true, score });
-    } else {
-      res.status(404).json({ error: "Candidate not found" });
-    }
   });
 
   app.post("/api/match", async (req, res) => {
-    const { jd_text, priority = "Balanced" } = req.body;
-    const db = readDB();
-    const subset = db.candidates;
+    const { jd_text } = req.body;
+    if (!jd_text) return res.status(400).json({ error: "JD text is required" });
+
+    // Using a smaller subset to stay within token limits for the free tier
+    const subset = CANDIDATE_DB.slice(0, 40);
 
     const prompt = `
       Analyze this Job Description: "${jd_text}"
-      Priority Weighting: Focus heavily on ${priority}.
       
-      Task 1: Generate 3 category tags.
-      Task 2: Select the top candidates from this list (provide explainability): ${JSON.stringify(subset)}
+      Task 1: Generate 3-4 category tags for this JD.
+      Task 2: Select the top 12 most relevant candidates from this list (provide explainability for each): ${JSON.stringify(subset)}
       
       Respond strictly in JSON format:
       {
           "jd_tags": ["Tag1", "Tag2"],
           "candidates": [
-              { "id": "1", "name": "Name", "title": "Title", "experience": 5, "matchScore": 85, "explainability": "Summary", "interestScore": null, "skill_radar": { "Technical": 90, "System Design": 80, "Communication": 85, "Leadership": 60, "Problem Solving": 95 } }
+              {
+                  "id": "1",
+                  "name": "Candidate Name",
+                  "title": "Title",
+                  "experience": 5,
+                  "matchScore": 85,
+                  "explainability": "Detailed summary.",
+                  "interestScore": null,
+                  "status": "Lead",
+                  "insights": {
+                    "pros": ["Strong backend", "Mentorship exp"],
+                    "cons": ["Limited frontend", "Salary expectations high"],
+                    "cultureFit": "High (Values collaboration)"
+                  },
+                  "skill_radar": {
+                      "Technical": 90,
+                      "System Design": 80,
+                      "Communication": 85,
+                      "Leadership": 60,
+                      "Problem Solving": 95
+                  }
+              }
           ]
       }
     `;
 
     try {
-      const cleanJsonText = await callGemini(prompt, apiKey);
-      res.json(JSON.parse(cleanJsonText));
+      const response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      });
+      const text = response.text.replace(/```json|```/gi, "").trim();
+      const data = JSON.parse(text);
+      res.json(data);
+    } catch (error) {
+      console.error("Match error:", error);
+      res.status(500).json({ error: "Failed to analyze candidates" });
+    }
+  });
+
+  app.post("/api/draft", async (req: any, res) => {
+    const { candidate, jd_text } = req.body;
+    
+    const prompt = `
+      You are ScoutAI. Write a SHORT, personalized LinkedIn outreach message for ${candidate.name}.
+      They are a ${candidate.title}.
+      The Job context is: ${jd_text}.
+      
+      Make it warm, professional, and slightly conversational. 
+      Respond ONLY with the message text.
+    `;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      });
+      res.json({ draft: response.text });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   app.post("/api/chat", upload.single('file'), async (req: any, res) => {
-    const { candidate_id, history, isCandidateRole } = req.body;
+    const { candidate_id, history } = req.body;
     const file = req.file;
-    const db = readDB();
-    const candidate = db.candidates.find((c: any) => c.id === candidate_id);
+    const parsedHistory = JSON.parse(history);
     
-    if (!candidate) return res.status(404).json({ error: "Candidate not found" });
-
+    const candidate = CANDIDATE_DB.find(c => c.id === candidate_id) || CANDIDATE_DB[0];
+    
     let fileContent = "";
     if (file && file.mimetype === "application/pdf") {
       try {
@@ -147,59 +155,58 @@ async function startServer() {
       }
     }
 
-    const parsedHistory = JSON.parse(history);
     const formattedHistory = parsedHistory.map((h: any) => `${h.role}: ${h.content}`).join("\n");
 
-    let prompt = "";
-    if (isCandidateRole === "true") {
-      prompt = `
-        You are simulating an AI Recruiter at ScoutAI. 
-        You are chatting with a candidate named ${candidate.name} (${candidate.title}).
-        Your goal is to be helpful, answer their questions about their application status (${candidate.status}), and keep them engaged.
-        ${fileContent ? `Context: You just shared a document. Its content is: ${fileContent.slice(0, 3000)}` : ""}
-        
-        Chat History:
-        ${formattedHistory}
-        
-        Respond strictly in JSON format:
-        { "reply": "Your message as the recruiter." }
-      `;
-    } else {
-      prompt = `
-        You are simulating the PERSON: ${candidate.name}, a ${candidate.title}.
-        PERSONALITY TRAITS: ${candidate.personality}
-        Your profile: ${candidate.experience} years exp, Notice: ${candidate.noticePeriod}, Location: ${candidate.location}.
-        ${candidate.resumeText ? `Here is your full Resume text to draw context from: """${candidate.resumeText}"""` : ""}
-        ${fileContent ? `Context: You just shared a document. Its content is: ${fileContent.slice(0, 3000)}` : ""}
-        
-        You are being contacted by a Recruiter. Respond based on your personality and history. Do not initiate unless asked.
-        
-        Chat History:
-        ${formattedHistory}
-        
-        Respond strictly in JSON format:
-        { "reply": "Your message as the candidate.", "interestScore": 85 }
-      `;
-    }
+    const prompt = `
+      You are simulating the PERSON: ${candidate.name}, a ${candidate.title} with skills in ${candidate.raw_skills}.
+      You are being interviewed/contacted by a Recruiter for a new opportunity.
+      
+      Your goal is to be professional, interested but discerning. 
+      Respond to the Recruiter's latest message based on your profile and the history.
+      
+      ${fileContent ? `Context: You just shared a document (like a portfolio or updated CV). Its content is: ${fileContent.slice(0, 5000)}` : ""}
+
+      Chat History:
+      ${formattedHistory}
+      
+      Respond strictly in JSON format:
+      {
+          "reply": "Your message as the candidate.",
+          "interestScore": 85
+      }
+      (The interestScore should represent the candidate's interest level from 10 to 100).
+    `;
 
     try {
-      const cleanJsonText = await callGemini(prompt, apiKey);
-      res.json(JSON.parse(cleanJsonText));
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      const response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      });
+      const text = response.text.replace(/```json|```/gi, "").trim();
+      res.json(JSON.parse(text));
+    } catch (error) {
+      console.error("Chat error:", error);
+      res.status(500).json({ error: "Failed to generate chat response" });
     }
   });
 
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
   }
 
-  app.listen(PORT, "0.0.0.0", () => console.log(`Server running on http://localhost:${PORT}`));
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
 }
 
 startServer();
