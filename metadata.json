@@ -1,0 +1,6 @@
+{
+  "name": "ScoutAI Talent Agent",
+  "description": "AI-powered recruiter agent that parses JDs, matches candidates, and engages them via conversational AI to assess interest and fit.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": []
+}
